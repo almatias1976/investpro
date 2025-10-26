@@ -7,7 +7,5 @@ services:
     envVars:
       - key: PORT
         value: 10000
-      - key: EXCEL_FILE
-        value: D:\Python\Sistema\RTD\RTD-python.xlsx
     plan: free
     autoDeploy: true
