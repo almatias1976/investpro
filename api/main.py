@@ -1,106 +1,67 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from openpyxl import load_workbook
-from fastapi.middleware.cors import CORSMiddleware
 import os
-import time
+import pythoncom
+import win32com.client
 
-app = FastAPI(title="RTD Backend", version="2.0.0")
+app = FastAPI(title="RTD Backend", version="1.1.0")
 
-# CORS para permitir acesso do Lovable ou outro frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Modelo esperado no corpo da requisição
-class TickerPayload(BaseModel):
-    ticker: str
-
-# Caminho da planilha RTD
 EXCEL_PATH = r"D:\Python\Sistema\RTD\RTD-python.xlsx"
 
-@app.post("/ingest")
-def ingest(payload: TickerPayload):
-    """Recebe o ticker, grava no Excel (A2), espera o RTD atualizar e retorna os valores."""
-    ticker = payload.ticker.strip().upper()
+# Variável global para manter o Excel vivo
+excel_instance = None
+wb_instance = None
+ws_instance = None
 
-    if not os.path.exists(EXCEL_PATH):
-        raise HTTPException(status_code=404, detail="Arquivo RTD-python.xlsx não encontrado.")
+
+def init_excel():
+    """Abre o Excel uma única vez e mantém ele aberto."""
+    global excel_instance, wb_instance, ws_instance
 
     try:
-        wb = load_workbook(EXCEL_PATH)
-        ws = wb.active
-
-        # Grava o ticker na célula A2
-        ws["A2"] = ticker
-        wb.save(EXCEL_PATH)
-
-        # Aguarda alguns segundos para o RTD atualizar
-        time.sleep(3)
-
-        # Recarrega planilha com dados atualizados
-        wb = load_workbook(EXCEL_PATH, data_only=True)
-        ws = wb.active
-
-        data = {
-            "ticker": ws["A2"].value,
-            "cotacao": ws["B2"].value,
-            "strike": ws["C2"].value,
-            "vencimento": ws["D2"].value,
-            "bid": ws["E2"].value,
-            "ask": ws["F2"].value,
-            "delta": ws["G2"].value,
-            "theta": ws["H2"].value,
-            "vol_imp": ws["I2"].value,
-            "vl_ex": ws["J2"].value,
-            "negocios": ws["K2"].value,
-        }
-
-        return {"message": "Ticker atualizado com sucesso!", "data": data}
-
+        pythoncom.CoInitialize()
+        excel_instance = win32com.client.Dispatch("Excel.Application")
+        excel_instance.Visible = True  # ⬅️ Mantém aberto visivelmente
+        wb_instance = excel_instance.Workbooks.Open(EXCEL_PATH)
+        ws_instance = wb_instance.Sheets(1)
+        print("✅ Excel inicializado e mantido ativo.")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao processar: {str(e)}")
+        print(f"❌ Falha ao iniciar Excel: {e}")
+        raise
+
+
+@app.on_event("startup")
+def startup_event():
+    """Executado quando o FastAPI inicia"""
+    if not os.path.exists(EXCEL_PATH):
+        raise FileNotFoundError(f"Planilha não encontrada em: {EXCEL_PATH}")
+    init_excel()
+
+
+class IngestPayload(BaseModel):
+    ticker: str
+
+
+@app.post("/ingest")
+def ingest(payload: IngestPayload):
+    """Escreve o ticker no Excel e mantém aberto (RTD faz o resto)."""
+    global ws_instance
+
+    try:
+        ws_instance.Range("A2").Value = payload.ticker
+        wb_instance.Save()
+        print(f"🟢 Ticker '{payload.ticker}' gravado com sucesso.")
+        return {"status": "ok", "ticker": payload.ticker}
+    except Exception as e:
+        print(f"❌ Erro ao gravar ticker: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
 def health():
-    """Verifica se o servidor está ativo"""
-    return {"status": "ok"}
+    return {"status": "ok", "service": "RTD ativo"}
 
 
-@app.get("/tickers")
-def list_tickers():
-    """Retorna o ticker atual no Excel"""
-    if not os.path.exists(EXCEL_PATH):
-        raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
-
-    wb = load_workbook(EXCEL_PATH, data_only=True)
-    ws = wb.active
-    return {"ticker": ws["A2"].value or ""}
-
-
-@app.get("/latest")
-def get_latest():
-    """Retorna os últimos valores da linha 2"""
-    if not os.path.exists(EXCEL_PATH):
-        raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
-
-    wb = load_workbook(EXCEL_PATH, data_only=True)
-    ws = wb.active
-
-    return {
-        "ticker": ws["A2"].value,
-        "cotacao": ws["B2"].value,
-        "strike": ws["C2"].value,
-        "vencimento": ws["D2"].value,
-        "bid": ws["E2"].value,
-        "ask": ws["F2"].value,
-        "delta": ws["G2"].value,
-        "theta": ws["H2"].value,
-        "vol_imp": ws["I2"].value,
-        "vl_ex": ws["J2"].value,
-        "negocios": ws["K2"].value,
-    }
+@app.get("/")
+def root():
+    return {"message": "RTD Backend operante. Use POST /ingest para enviar ticker."}
