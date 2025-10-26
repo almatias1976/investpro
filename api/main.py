@@ -1,107 +1,117 @@
 import os
 import time
 import threading
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from dotenv import load_dotenv
+
+# Para rodar localmente, este import funciona:
+try:
+    import win32com.client
+except ImportError:
+    win32com = None  # Em ambiente Render, win32com não existe
 
 # ------------------------------------------------------------
 # 🔧 Configuração
 # ------------------------------------------------------------
 load_dotenv()
 
-EXCEL_FILE = os.getenv("EXCEL_FILE", r"D:\Python\Sistema\RTD\RTD-python.xlsx")
+EXCEL_PATH = os.getenv("EXCEL_FILE", r"D:\Python\Sistema\RTD\RTD-python.xlsx")
 SHEET_NAME = os.getenv("SHEET_NAME", "RTD")
+TICKER_CELL = "A2"
+PRICE_CELL = "B2"
 
-# ------------------------------------------------------------
-# 🚀 Inicialização do FastAPI
-# ------------------------------------------------------------
-app = FastAPI(title="InvestPro RTD API")
+app = FastAPI(title="InvestPro RTD", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Libera acesso do Lovable
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ------------------------------------------------------------
-# 📦 Modelo de entrada
-# ------------------------------------------------------------
-class IngestData(BaseModel):
-    ticker: str
+excel = None
+wb = None
 
 # ------------------------------------------------------------
-# 🧩 Função condicional (apenas ativa no Windows)
+# 🧩 Função auxiliar
 # ------------------------------------------------------------
-if os.name == "nt":
-    import pythoncom
-    import win32com.client
+def conectar_excel():
+    """Conecta ao Excel local ou abre caso necessário."""
+    global excel, wb
+    if win32com is None:
+        print("🌐 Executando em ambiente de servidor (sem Excel).")
+        return None, None
 
-    class ExcelController:
-        def __init__(self, path: str, sheet_name: str):
-            pythoncom.CoInitialize()
-            self.path = path
-            self.sheet_name = sheet_name
-            self.excel = win32com.client.Dispatch("Excel.Application")
-            self.excel.Visible = True
-            self.wb = self.excel.Workbooks.Open(self.path)
-            self.ws = self.wb.Worksheets(self.sheet_name)
-            print(f"✅ Excel aberto: {self.path}")
+    try:
+        excel = win32com.client.Dispatch("Excel.Application")
+        excel.Visible = True
+        wb = excel.Workbooks.Open(EXCEL_PATH)
+        ws = wb.Worksheets(SHEET_NAME)
+        print(f"✅ Planilha carregada: {EXCEL_PATH}")
+        return ws
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao conectar Excel: {e}")
 
-        def write_ticker(self, ticker: str):
-            """Escreve o ticker na célula A2 e aguarda RTD atualizar."""
-            try:
-                self.ws.Range("A2").Value = ticker
-                self.excel.CalculateFullRebuild()
-                print(f"[INFO] Ticker '{ticker}' enviado para Excel.")
-                time.sleep(2)
-                price = self.ws.Range("B2").Value
-                strike = self.ws.Range("C2").Value
-                venc = self.ws.Range("D2").Value
-                return {
-                    "ticker": ticker,
-                    "price": price,
-                    "strike": strike,
-                    "vencimento": venc,
-                }
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-
-else:
-    ExcelController = None  # no Linux/Render
-
-excel_ctrl = None
-
+# ------------------------------------------------------------
+# 🚀 Inicialização
+# ------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
-    """Executa ao iniciar a API."""
-    global excel_ctrl
-    if os.name == "nt":
+    global excel, wb
+    if win32com:
         try:
-            excel_ctrl = ExcelController(EXCEL_FILE, SHEET_NAME)
-            print("✅ Excel inicializado e mantido aberto.")
+            excel = win32com.client.Dispatch("Excel.Application")
+            wb = excel.Workbooks.Open(EXCEL_PATH)
+            print(f"✅ Excel inicializado: {EXCEL_PATH}")
         except Exception as e:
-            print(f"⚠️ Falha ao iniciar Excel: {e}")
+            print(f"⚠️ Não foi possível abrir Excel no startup: {e}")
     else:
         print("🌐 Executando em ambiente de servidor (Render) — sem Excel local.")
 
+# ------------------------------------------------------------
+# 📡 Endpoint principal
+# ------------------------------------------------------------
 @app.post("/ingest")
-def ingest(data: IngestData):
-    """Recebe o ticker e grava no Excel (apenas local)."""
-    if os.name != "nt":
-        # No Render, apenas retorna confirmação
-        return {"message": f"Ticker '{data.ticker}' recebido (modo servidor)."}
+async def ingest_dados(request: Request):
+    """Recebe o ticker e grava na planilha local."""
+    data = await request.json()
+    ticker = data.get("ticker")
+
+    if not ticker:
+        raise HTTPException(status_code=400, detail="Ticker não informado")
+
+    if win32com is None:
+        # Ambiente Render — apenas simula resposta
+        return {"ticker": ticker, "price": 0.00, "status": "Simulado (Render)"}
+
     try:
-        if excel_ctrl is None:
-            raise HTTPException(status_code=500, detail="Excel não inicializado.")
-        result = excel_ctrl.write_ticker(data.ticker)
-        return result
+        ws = wb.Worksheets(SHEET_NAME)
+        ws.Range(TICKER_CELL).Value = ticker.upper()
+
+        # Aguarda o RTD atualizar o valor da célula B2
+        tempo_maximo = 10
+        for _ in range(tempo_maximo):
+            preco = ws.Range(PRICE_CELL).Value
+            if preco not in (None, "", 0, -2146826246):
+                break
+            time.sleep(1)
+            wb.Application.CalculateFullRebuild()
+
+        preco = ws.Range(PRICE_CELL).Value
+        if preco in (None, "", 0, -2146826246):
+            raise HTTPException(status_code=500, detail="RTD não retornou valor")
+
+        return {"ticker": ticker.upper(), "price": round(float(preco), 2)}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/")
-def root():
-    return {"status": "API RTD ativa!"}
+# ------------------------------------------------------------
+# ✅ Health check
+# ------------------------------------------------------------
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
