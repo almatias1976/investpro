@@ -1,14 +1,12 @@
 services:
   - type: web
     name: investpro
-    env: python
+    runtime: python3.11.8
     buildCommand: pip install -r api/requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PORT
         value: 10000
-      - key: PYTHON_VERSION
-        value: 3.11.8
       - key: INGEST_TOKEN
         value: RTD_123456!
     autoDeploy: true
