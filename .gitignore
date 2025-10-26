@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.db
+
+# Excel temporários
+~$*
+
+# IDE
+.vscode/
+.idea/
+
+# Tokens
+.env
